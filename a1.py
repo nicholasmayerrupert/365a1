@@ -6,7 +6,7 @@ class BMPViewer(tk.Frame):
     def __init__(self, master):
         super().__init__(master)
         self.master = master
-        self.master.geometry("500x600")  
+        self.master.geometry("1600x900")  
         self.master.resizable(True, True) 
         self.pack()
         self.create_widgets()
@@ -112,8 +112,7 @@ class BMPViewer(tk.Frame):
         self.update_image()
 
     def parse_bmp(self, bmp_bytes):
-        """Parses the BMP header and pixel data.
-           Returns a metadata dictionary and a 2D pixel array (top-down order)."""
+    
         metadata = {}
         metadata['file_size'] = int.from_bytes(bmp_bytes[2:6], 'little')
         data_offset = int.from_bytes(bmp_bytes[10:14], 'little')
