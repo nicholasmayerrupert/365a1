@@ -1,24 +1,24 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox
-import base64
+import threading
 
 class BMPViewer(tk.Frame):
     def __init__(self, master):
         super().__init__(master)
         self.master = master
-        self.master.geometry("1600x900")  
-        self.master.resizable(True, True) 
-        self.pack()
+        self.master.geometry("1600x900")
+        self.master.resizable(True, True)
+        self.pack(expand=True, fill=tk.BOTH)
         self.create_widgets()
 
-        self.original_pixels = None   
+        self.original_pixels = None
         self.metadata = {}
 
         self.brightness_value = 100
-        self.scale_value = 100     
-        self.r_enabled = True      
-        self.g_enabled = True      
-        self.b_enabled = True      
+        self.scale_value = 100
+        self.r_enabled = True
+        self.g_enabled = True
+        self.b_enabled = True
 
     def create_widgets(self):
         self.open_button = tk.Button(self, text="Open BMP File", command=self.open_file)
@@ -29,6 +29,8 @@ class BMPViewer(tk.Frame):
 
         self.canvas = tk.Canvas(self, bg="white")
         self.canvas.pack(pady=10, expand=True, fill=tk.BOTH)
+        # Bind the canvas resize event to recenter the image
+        self.canvas.bind("<Configure>", self.on_canvas_configure)
 
         self.brightness_slider = tk.Scale(
             self, from_=0, to=100, orient=tk.HORIZONTAL,
@@ -74,27 +76,36 @@ class BMPViewer(tk.Frame):
         self.update_image()
 
     def open_file(self):
-        file_path = filedialog.askopenfilename(filetypes=[("BMP files", "*.bmp;*.BMP")])
+        file_path = filedialog.askopenfilename(
+            filetypes=[("BMP files", "*.bmp"), ("BMP files", "*.BMP")]
+        )
         if not file_path:
             return
+        threading.Thread(target=self.open_file_thread, args=(file_path,), daemon=True).start()
 
+    def open_file_thread(self, file_path):
         try:
             with open(file_path, "rb") as f:
                 bmp_bytes = f.read()
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to open file: {e}")
+            self.master.after(0, lambda: messagebox.showerror("Error", f"Failed to open file: {e}"))
             return
 
         if bmp_bytes[0:2] != b'BM':
-            messagebox.showerror("Error", "Not a valid BMP file.")
+            self.master.after(0, lambda: messagebox.showerror("Error", "Not a valid BMP file."))
             return
 
         try:
-            self.metadata, self.original_pixels = self.parse_bmp(bmp_bytes)
+            metadata, pixels = self.parse_bmp(bmp_bytes)
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to parse BMP file: {e}")
+            self.master.after(0, lambda: messagebox.showerror("Error", f"Failed to parse BMP file: {e}"))
             return
 
+        self.metadata = metadata
+        self.original_pixels = pixels
+        self.master.after(0, self.update_after_open)
+
+    def update_after_open(self):
         meta_text = (
             f"File Size: {self.metadata.get('file_size')}\n"
             f"Width: {self.metadata.get('width')}\n"
@@ -111,8 +122,85 @@ class BMPViewer(tk.Frame):
 
         self.update_image()
 
+    def update_image(self):
+        if self.original_pixels is None:
+            return
+        #start a thread to process the image (including brightness transformation)
+        threading.Thread(target=self.threaded_update_image, daemon=True).start()
+
+    def threaded_update_image(self):
+        #perform the heavy image stuff in this thread
+        transformed = []
+        for row in self.original_pixels:
+            new_row = []
+            for pixel in row:
+                R, G, B = pixel
+                #toggles for R, G, B channels
+                R = R if self.r_enabled else 0
+                G = G if self.g_enabled else 0
+                B = B if self.b_enabled else 0
+                #brightness factor
+                factor = self.brightness_value / 100.0
+                R = max(0, min(255, int(R * factor)))
+                G = max(0, min(255, int(G * factor)))
+                B = max(0, min(255, int(B * factor)))
+                new_row.append((R, G, B))
+            transformed.append(new_row)
+
+        scaled = self.scale_image(transformed, self.scale_value)
+        #generate the ppm data from the processed pixel array
+        ppm_data = self.generate_ppm(scaled)
+        #update the canvas on the main thread
+        self.master.after(0, lambda: self.update_canvas(ppm_data))
+
+    def update_canvas(self, ppm_data):
+        self.canvas.delete("all")
+        try:
+            ppm_str = ppm_data.decode('latin-1')
+            self.photo = tk.PhotoImage(data=ppm_str, format="PPM")
+            canvas_width = self.canvas.winfo_width()
+            canvas_height = self.canvas.winfo_height()
+            self.image_id = self.canvas.create_image(
+                canvas_width / 2, canvas_height / 2, anchor=tk.CENTER, image=self.photo
+            )
+            self.canvas.config(scrollregion=self.canvas.bbox(tk.ALL))
+            self.canvas.update_idletasks()
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to update image: {e}")
+
+    def on_canvas_configure(self, event):
+        #recenter the image IF it exists
+        if hasattr(self, 'image_id') and self.photo is not None:
+            self.canvas.coords(self.image_id, event.width / 2, event.height / 2)
+
+    def scale_image(self, pixels, scale_percent):
+        if scale_percent <= 0:
+            return [[(0, 0, 0)]]
+        orig_height = len(pixels)
+        orig_width = len(pixels[0]) if orig_height > 0 else 0
+        new_width = max(1, int(orig_width * scale_percent / 100))
+        new_height = max(1, int(orig_height * scale_percent / 100))
+        new_pixels = []
+        for y in range(new_height):
+            orig_y = int(y * orig_height / new_height)
+            row = []
+            for x in range(new_width):
+                orig_x = int(x * orig_width / new_width)
+                row.append(pixels[orig_y][orig_x])
+            new_pixels.append(row)
+        return new_pixels
+
+    def generate_ppm(self, pixels):
+        height = len(pixels)
+        width = len(pixels[0]) if height > 0 else 0
+        header = f"P6\n{width} {height}\n255\n".encode('ascii')
+        data = bytearray()
+        for row in pixels:
+            for (R, G, B) in row:
+                data.extend(bytes((R, G, B)))
+        return header + data
+
     def parse_bmp(self, bmp_bytes):
-    
         metadata = {}
         metadata['file_size'] = int.from_bytes(bmp_bytes[2:6], 'little')
         data_offset = int.from_bytes(bmp_bytes[10:14], 'little')
@@ -182,7 +270,7 @@ class BMPViewer(tk.Frame):
             entry = bmp_bytes[ct_start + i * 4: ct_start + i * 4 + 4]
             B, G, R, _ = entry[0], entry[1], entry[2], entry[3]
             color_table.append((R, G, B))
-        row_size = width  
+        row_size = width
         padded_row_size = ((row_size + 3) // 4) * 4
         pixels = []
         pixel_data = bmp_bytes[data_offset:]
@@ -209,7 +297,7 @@ class BMPViewer(tk.Frame):
             entry = bmp_bytes[ct_start + i * 4: ct_start + i * 4 + 4]
             B, G, R, _ = entry[0], entry[1], entry[2], entry[3]
             color_table.append((R, G, B))
-        row_bytes = (width + 1) // 2 
+        row_bytes = (width + 1) // 2
         padded_row_size = ((row_bytes + 3) // 4) * 4
         pixels = []
         pixel_data = bmp_bytes[data_offset:]
@@ -240,7 +328,7 @@ class BMPViewer(tk.Frame):
             entry = bmp_bytes[ct_start + i * 4: ct_start + i * 4 + 4]
             B, G, R, _ = entry[0], entry[1], entry[2], entry[3]
             color_table.append((R, G, B))
-        row_bytes = (width + 7) // 8 
+        row_bytes = (width + 7) // 8
         padded_row_size = ((row_bytes + 3) // 4) * 4
         pixels = []
         pixel_data = bmp_bytes[data_offset:]
@@ -249,72 +337,13 @@ class BMPViewer(tk.Frame):
             row_start = row * padded_row_size
             for col in range(width):
                 byte_val = pixel_data[row_start + (col // 8)]
-                bit_index = 7 - (col % 8)  
+                bit_index = 7 - (col % 8)
                 bit = (byte_val >> bit_index) & 1
                 row_pixels.append(color_table[bit])
             pixels.append(row_pixels)
         if int.from_bytes(bmp_bytes[22:26], 'little', signed=True) > 0:
             pixels.reverse()
         return pixels
-
-    def update_image(self):
-        if self.original_pixels is None:
-            return
-
-        transformed = []
-        for row in self.original_pixels:
-            new_row = []
-            for pixel in row:
-                R, G, B = pixel
-                R = R if self.r_enabled else 0
-                G = G if self.g_enabled else 0
-                B = B if self.b_enabled else 0
-                factor = self.brightness_value / 100.0
-                R = max(0, min(255, int(R * factor)))
-                G = max(0, min(255, int(G * factor)))
-                B = max(0, min(255, int(B * factor)))
-                new_row.append((R, G, B))
-            transformed.append(new_row)
-
-        scaled = self.scale_image(transformed, self.scale_value)
-
-        ppm_data = self.generate_ppm(scaled)
-        try:
-            ppm_str = ppm_data.decode('latin-1')
-            self.photo = tk.PhotoImage(data=ppm_str, format="PPM")
-            self.canvas.create_image(0, 0, anchor=tk.NW, image=self.photo)
-            self.canvas.config(scrollregion=self.canvas.bbox(tk.ALL)) 
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to update image: {e}")
-
-
-    def scale_image(self, pixels, scale_percent):
-    
-        if scale_percent <= 0:
-            return [[(0, 0, 0)]]
-        orig_height = len(pixels)
-        orig_width = len(pixels[0]) if orig_height > 0 else 0
-        new_width = max(1, int(orig_width * scale_percent / 100))
-        new_height = max(1, int(orig_height * scale_percent / 100))
-        new_pixels = []
-        for y in range(new_height):
-            orig_y = int(y * orig_height / new_height)
-            row = []
-            for x in range(new_width):
-                orig_x = int(x * orig_width / new_width)
-                row.append(pixels[orig_y][orig_x])
-            new_pixels.append(row)
-        return new_pixels
-
-    def generate_ppm(self, pixels):
-        height = len(pixels)
-        width = len(pixels[0]) if height > 0 else 0
-        header = f"P6\n{width} {height}\n255\n".encode('ascii')
-        data = bytearray()
-        for row in pixels:
-            for (R, G, B) in row:
-                data.extend(bytes((R, G, B)))
-        return header + data
 
 if __name__ == "__main__":
     root = tk.Tk()
