@@ -29,7 +29,7 @@ class BMPViewer(tk.Frame):
 
         self.canvas = tk.Canvas(self, bg="white")
         self.canvas.pack(pady=10, expand=True, fill=tk.BOTH)
-        # Bind the canvas resize event to recenter the image
+        #bind the canvas resize event to recenter the image
         self.canvas.bind("<Configure>", self.on_canvas_configure)
 
         self.brightness_slider = tk.Scale(
